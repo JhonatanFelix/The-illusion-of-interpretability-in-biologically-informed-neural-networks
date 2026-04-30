@@ -10,7 +10,7 @@ The project investigates whether embedding biological structure (e.g., pathways)
 
 ## Graphical Abstract
 
-![Graphical Abstract](Figures/graphical_abstract.png)
+![Graphical Abstract](Figures/Graphical_Abstract.png)
 
 ---
 
