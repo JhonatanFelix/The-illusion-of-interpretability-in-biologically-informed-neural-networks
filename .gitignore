@@ -183,7 +183,6 @@ cython_debug/
 *.log
 *.pt
 *.svg
-*.png
 *.jpeg
 *.jpg
 
