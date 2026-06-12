@@ -218,6 +218,75 @@ results_new/
 
 ---
 
+# Objective-level anchoring experiments
+
+The script `pathway_tasks_supervision.py` contained in Code reproduces the objective-level anchoring experiments used to test whether internal supervision can restore recovery of the biologically annotated first layer. The script implements output-only training, direct first-layer weight supervision, pathway-activation supervision, noisy and partial activation supervision, proxy activation supervision, and random/shuffled activation controls. In all supervised settings, the student is trained with an augmented objective of the form:
+
+```text
+L_total = L_output + lambda_supervision * L_anchor
+```
+
+where `L_output` matches the teacher output and `L_anchor` constrains either first-layer weights, pathway-node activations, noisy/partial activations, or low-dimensional proxy measurements.
+
+A full main simulation across the four tasks can be launched with:
+
+```bash
+python pathway_tasks_supervision.py \
+  --task all \
+  --sweep main_sim \
+  --students 20 \
+  --epochs 120 \
+  --n_train 12000 \
+  --n_test 3000 \
+  --P_values 20,40,60,100 \
+  --density_values 0.02,0.05,0.10,0.20 \
+  --lambda_supervision 1 \
+  --outdir results_main_sim_density \
+  --device cuda \
+  --make_plots
+```
+
+This generates `metrics_summary.csv`, containing one row per trained student model, and `metrics_per_pathway.csv`, containing pathway-level recovery metrics. If `--make_plots` is used, basic diagnostic figures are saved in the `figures/` subfolder of the output directory.
+
+Specific anchoring analyses can be launched with the `--sweep` argument. For example, the activation noise/coverage phase diagram can be reproduced with:
+
+```bash
+python pathway_tasks_supervision.py \
+  --task all \
+  --sweep phase \
+  --students 20 \
+  --epochs 120 \
+  --n_train 12000 \
+  --n_test 3000 \
+  --sigma_values 0,0.5,1,2,5,10,20,50 \
+  --rho_values 0,0.1,0.25,0.5,0.75,1 \
+  --lambda_supervision 1 \
+  --mask_density 0.05 \
+  --outdir results_phase_noise_coverage \
+  --device cuda \
+  --make_plots
+```
+
+A supervision-strength sweep can be run as:
+
+```bash
+python pathway_tasks_supervision.py \
+  --task all \
+  --sweep lambda \
+  --mode weights \
+  --lambda_values 1e-6,1e-5,1e-4,1e-3,1e-2,1e-1,0.5,1,5,10,50,100,500,1000,5000,10000,50000,100000,500000,1000000 \
+  --students 20 \
+  --epochs 120 \
+  --n_train 12000 \
+  --n_test 3000 \
+  --mask_density 0.05 \
+  --outdir results_lambda_weights \
+  --device cuda
+```
+
+For activation-supervision strength, replace `--mode weights` with `--mode activation`.
+
+
 ##  Reproducing Paper Results
 
 To fully reproduce the experiments:
