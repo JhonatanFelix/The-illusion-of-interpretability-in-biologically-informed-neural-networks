@@ -218,7 +218,7 @@ results_new/
 
 ---
 
-# Objective-level anchoring experiments
+### Objective-level anchoring experiments
 
 The script `pathway_tasks_supervision.py` contained in Code reproduces the objective-level anchoring experiments used to test whether internal supervision can restore recovery of the biologically annotated first layer. The script implements output-only training, direct first-layer weight supervision, pathway-activation supervision, noisy and partial activation supervision, proxy activation supervision, and random/shuffled activation controls. In all supervised settings, the student is trained with an augmented objective of the form:
 
