@@ -4,7 +4,7 @@ This repository contains the code, results, and figures for the paper:
 
 > **The illusion of interpretability in biologically informed neural networks**
 
-The project investigates whether embedding biological structure (e.g., pathways) into neural networks truly leads to meaningful interpretability, or whether this assumption can be misleading.
+The project investigates whether embedding biological structure, such as gene–pathway relationships, into neural network architectures is sufficient to guarantee meaningful mechanistic interpretability. We show that topology-constrained biologically informed neural networks can accurately reproduce the teacher input–output function while failing to recover the underlying biological weights and pathway-level activations.
 
 ---
 
@@ -14,89 +14,108 @@ The project investigates whether embedding biological structure (e.g., pathways)
 
 ---
 
-##  Repository Structure
+## Repository Structure
 
 ```text
 .
 ├── Code/
-│   └── pathway_tasks_complete.py
+│   ├── pathway_tasks_complete.py
+│   └── pathway_tasks_supervision.py
 ├── Figures/
-│   ├── graphical_abstract.png
+│   ├── Graphical_Abstract.png
 │   └── (all figures used in the paper)
 ├── Results_Parameter_Level/
-│   ├── (metrics for all tasks)
-│   └── (scripts to reproduce paper figures)
+│   ├── (parameter-level recovery metrics)
+│   └── (scripts to reproduce parameter-level figures)
 ├── Results_Activation_Level/
-│   ├── (activation-level interpretability results)
-│   └── (scripts to reproduce paper figures)
+│   ├── (activation-level recovery metrics)
+│   └── (scripts to reproduce activation-level figures)
+└── README.md
 ```
 
-###  Code
+---
 
-The `Code/` folder contains the main script:
+## Code
 
-* `pathway_tasks_complete.py`
-  → Runs all experiments across all tasks and configurations.
+The `Code/` folder contains the main scripts used in the study.
 
-###  Figures
+### `pathway_tasks_complete.py`
 
-Contains all figures used in the paper, including the graphical abstract.
+This script reproduces the main teacher–student experiments used to test whether topology-constrained biologically informed neural networks recover the internal biological structure of the teacher model under output-only training.
 
-###  Results_Parameter_Level
+It includes:
 
-* Interpretability analysis at the **parameter level**
-* Includes:
+* output-only teacher–student distillation;
+* parameter-level recovery analysis of first-layer gene-to-pathway weights;
+* activation-level recovery analysis of pathway-node activations;
+* prediction tasks across binary classification, multiclass classification, regression and survival analysis;
+* sensitivity analyses over biological structure and network architecture.
 
-  * Metrics across all tasks
-  * Code to reproduce figures in the paper
+### `pathway_tasks_supervision.py`
 
-###  Results_Activation_Level
+This script reproduces the objective-level anchoring experiments. These experiments test whether adding explicit internal supervision can restore recovery of the biologically annotated first layer.
 
-* Interpretability analysis at the **activation node level**
-* Includes:
+It includes:
 
-  * Metrics across all tasks
-  * Code to reproduce figures in the paper
+* output-only baseline;
+* direct first-layer weight supervision;
+* pathway-activation supervision;
+* noisy activation supervision;
+* partial activation supervision;
+* proxy activation supervision through low-dimensional linear mixtures;
+* random and shuffled activation negative controls;
+* sweeps over mask density, pathway-layer size, supervision strength, activation noise and pathway coverage.
 
 ---
 
-##  What the Code Does
+## Figures
 
-The main script implements a **Teacher–Student framework** using biologically informed neural networks.
-
-It supports four main tasks:
-
-* ✅ Binary classification
-* ✅ Multiclass classification
-* ✅ Regression
-* ✅ Survival analysis
-
-The default configuration uses a biologically inspired structure:
-
-* Number of genes (`G`)
-* Number of pathways (`P`)
-* Pathway sizes
-* Overlap between pathways
-
-These parameters can be modified via command line to reproduce all experiments in the paper, including:
-
-* Variations in network depth
-* Biological configuration sweeps:
-
-  * Number of genes (`G`)
-  * Number of pathways (`P`)
-  * Pathway size range
-  * Pathway overlap
+The `Figures/` folder contains the figures used in the paper, including the graphical abstract and the main/supplementary figures.
 
 ---
 
-## ⚙️ Installation
+## Results
+
+### `Results_Parameter_Level/`
+
+This folder contains results and figure-generation material for the parameter-level analyses, where interpretability is evaluated by comparing teacher and student first-layer gene-to-pathway weights.
+
+### `Results_Activation_Level/`
+
+This folder contains results and figure-generation material for the activation-level analyses, where interpretability is evaluated by comparing teacher and student pathway-node activations.
+
+---
+
+## What the Code Does
+
+The project implements a controlled **teacher–student framework** for biologically informed neural networks.
+
+A teacher network defines the ground-truth input–output function and the ground-truth internal biological representation. A student network with the same sparse biological wiring is then trained to match the teacher outputs. The key question is whether matching the teacher output is sufficient to recover the teacher’s internal biological weights and pathway activations.
+
+The code supports four prediction tasks:
+
+* binary classification;
+* multiclass classification;
+* regression;
+* survival analysis.
+
+The default simulated biological structure is defined by:
+
+* number of genes (`G`);
+* number of pathways (`P`);
+* pathway size range;
+* overlap between pathways;
+* sparse gene-to-pathway connectivity mask.
+
+These parameters can be modified through command-line arguments to reproduce the experiments and sensitivity analyses reported in the paper.
+
+---
+
+## Installation
 
 You can install the environment using either **Conda** or **pip**.
 
----
-
-###  Option 1 — Conda (Recommended)
+### Option 1 — Conda
 
 #### CPU version
 
@@ -107,7 +126,7 @@ conda activate pathway-ts
 conda install numpy pandas pytorch cpuonly -c pytorch -c conda-forge
 ```
 
-#### GPU version (NVIDIA)
+#### GPU version
 
 ```bash
 conda create -n pathway-ts python=3.10
@@ -116,11 +135,9 @@ conda activate pathway-ts
 conda install pytorch pytorch-cuda=12.1 numpy pandas -c pytorch -c nvidia -c conda-forge
 ```
 
-> Adjust CUDA version according to your system.
+Adjust the CUDA version according to your system.
 
----
-
-###  Option 2 — pip
+### Option 2 — pip
 
 ```bash
 python -m venv venv
@@ -130,55 +147,36 @@ source venv/bin/activate   # Linux / Mac
 pip install numpy pandas
 ```
 
-#### Install PyTorch
+Install PyTorch separately according to your system configuration.
 
- CPU:
+CPU version:
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
- GPU:
-Go to https://pytorch.org/get-started/locally/ and select your configuration.
+For GPU installation, see the official PyTorch installation instructions: https://pytorch.org/get-started/locally/
 
 ---
 
-##  Usage
+## Usage: topology-only teacher–student experiments
 
-Run all tasks:
+The main output-only teacher–student experiments can be run with:
 
 ```bash
 python Code/pathway_tasks_complete.py --task all
 ```
 
-Run a specific task:
+Run a specific task with:
 
 ```bash
-python Code/pathway_tasks_complete.py --task survival
-python Code/pathway_tasks_complete.py --task regression
 python Code/pathway_tasks_complete.py --task binary
 python Code/pathway_tasks_complete.py --task multiclass
+python Code/pathway_tasks_complete.py --task regression
+python Code/pathway_tasks_complete.py --task survival
 ```
 
----
-
-##  Key Arguments
-
-You can customize both biological structure and model parameters:
-
-```bash
---G 400              # Number of genes
---P 60               # Number of pathways
---size_min 14        # Minimum pathway size
---size_max 22        # Maximum pathway size
---overlap 0.55       # Overlap between pathways
-
---hidden 64          # Hidden layer size
---epochs 120
---batch 512
-```
-
-Example:
+Example with custom biological structure:
 
 ```bash
 python Code/pathway_tasks_complete.py \
@@ -188,50 +186,43 @@ python Code/pathway_tasks_complete.py \
   --overlap 0.7
 ```
 
----
+Common arguments include:
 
-##  Outputs
-
-The script generates `.csv` files containing:
-
-### Performance metrics
-
-* Accuracy (classification)
-* MSE / R² (regression)
-* Concordance index (survival)
-
-### Knowledge distillation metrics
-
-* KL divergence
-* MSE between teacher and student outputs
-
-### Interpretability metrics
-
-* Weight recovery (parameter-level)
-* Activation alignment (node-level)
-
-Results are saved in:
-
-```text
-results_new/
+```bash
+--G 400              # Number of genes
+--P 60               # Number of pathways
+--size_min 14        # Minimum pathway size
+--size_max 22        # Maximum pathway size
+--overlap 0.55       # Overlap between pathways
+--hidden 64          # Hidden layer size
+--epochs 120         # Number of training epochs
+--batch 512          # Batch size
 ```
 
 ---
 
-### Objective-level anchoring experiments
+## Usage: objective-level anchoring experiments
 
-The script `pathway_tasks_supervision.py` contained in Code reproduces the objective-level anchoring experiments used to test whether internal supervision can restore recovery of the biologically annotated first layer. The script implements output-only training, direct first-layer weight supervision, pathway-activation supervision, noisy and partial activation supervision, proxy activation supervision, and random/shuffled activation controls. In all supervised settings, the student is trained with an augmented objective of the form:
+The objective-level anchoring experiments are implemented in:
+
+```text
+Code/pathway_tasks_supervision.py
+```
+
+These experiments add an internal anchoring term to the student loss:
 
 ```text
 L_total = L_output + lambda_supervision * L_anchor
 ```
 
-where `L_output` matches the teacher output and `L_anchor` constrains either first-layer weights, pathway-node activations, noisy/partial activations, or low-dimensional proxy measurements.
+where `L_output` matches the teacher output and `L_anchor` constrains one of the internal quantities of the model, such as first-layer weights, pathway-node activations, noisy/partial activations or low-dimensional proxy measurements.
+
+### Main anchoring simulation
 
 A full main simulation across the four tasks can be launched with:
 
 ```bash
-python pathway_tasks_supervision.py \
+python Code/pathway_tasks_supervision.py \
   --task all \
   --sweep main_sim \
   --students 20 \
@@ -246,12 +237,14 @@ python pathway_tasks_supervision.py \
   --make_plots
 ```
 
-This generates `metrics_summary.csv`, containing one row per trained student model, and `metrics_per_pathway.csv`, containing pathway-level recovery metrics. If `--make_plots` is used, basic diagnostic figures are saved in the `figures/` subfolder of the output directory.
+This sweep includes output-only training, direct weight supervision, activation supervision, noisy/partial activation supervision, and random/shuffled activation controls.
 
-Specific anchoring analyses can be launched with the `--sweep` argument. For example, the activation noise/coverage phase diagram can be reproduced with:
+### Activation noise and pathway coverage
+
+To reproduce the activation noise/coverage phase diagram:
 
 ```bash
-python pathway_tasks_supervision.py \
+python Code/pathway_tasks_supervision.py \
   --task all \
   --sweep phase \
   --students 20 \
@@ -267,10 +260,14 @@ python pathway_tasks_supervision.py \
   --make_plots
 ```
 
-A supervision-strength sweep can be run as:
+Here, `sigma` controls the amount of noise added to teacher pathway activations, while `rho` controls the fraction of pathway nodes for which activation supervision is available.
+
+### Supervision-strength sweep
+
+To run a sweep over the strength of direct first-layer weight supervision:
 
 ```bash
-python pathway_tasks_supervision.py \
+python Code/pathway_tasks_supervision.py \
   --task all \
   --sweep lambda \
   --mode weights \
@@ -284,40 +281,105 @@ python pathway_tasks_supervision.py \
   --device cuda
 ```
 
-For activation-supervision strength, replace `--mode weights` with `--mode activation`.
+For activation-supervision strength, replace:
 
+```bash
+--mode weights
+```
 
-##  Reproducing Paper Results
+with:
 
-To fully reproduce the experiments:
-
-1. Run the main script with different configurations
-2. Use the scripts provided in:
-
-   * `Results_Parameter_Level/`
-   * `Results_Activation_Level/`
-
-These folders include:
-
-* Precomputed results
-* Figure generation scripts used in the paper
+```bash
+--mode activation
+```
 
 ---
 
-##  Key Idea
+## Outputs
 
-This work challenges a common assumption:
+The scripts generate `.csv` files containing predictive, distillation and interpretability metrics.
 
-> Embedding biological structure into neural networks does **not necessarily guarantee interpretability**
+For `pathway_tasks_complete.py`, results are saved by default in:
+
+```text
+results_new/
+```
+
+For `pathway_tasks_supervision.py`, results are saved in the folder specified by:
+
+```bash
+--outdir
+```
+
+The anchoring script generates:
+
+```text
+metrics_summary.csv
+metrics_per_pathway.csv
+```
+
+where:
+
+* `metrics_summary.csv` contains one row per trained student model;
+* `metrics_per_pathway.csv` contains pathway-level recovery metrics.
+
+If `--make_plots` is used, diagnostic figures are saved in:
+
+```text
+<outdir>/figures/
+```
+
+The reported metrics include:
+
+### Predictive performance metrics
+
+* accuracy for classification;
+* MSE and R² for regression;
+* concordance index for survival analysis.
+
+### Knowledge-distillation metrics
+
+* KL divergence for multiclass classification;
+* MSE between teacher and student logits, outputs or risk scores.
+
+### Interpretability and recovery metrics
+
+* relative L2 error between teacher and student first-layer weights;
+* cosine similarity between teacher and student first-layer weights;
+* Pearson correlation between teacher and student pathway activations;
+* sample-wise activation cosine similarity;
+* activation-level R²;
+* Jaccard overlap for ranked biological entities where applicable.
+
+---
+
+## Reproducing Paper Results
+
+To reproduce the main results:
+
+1. Run `Code/pathway_tasks_complete.py` for the output-only teacher–student experiments.
+2. Run `Code/pathway_tasks_supervision.py` for the objective-level anchoring experiments.
+3. Use the scripts and precomputed outputs provided in:
+
+```text
+Results_Parameter_Level/
+Results_Activation_Level/
+```
+
+to regenerate the paper figures.
+
+---
+
+## Key Idea
+
+This work challenges the common assumption that embedding biological knowledge into neural network architecture is sufficient to make the learned model mechanistically interpretable.
 
 We show that:
 
-* Models can match predictions very closely (high agreement)
-* While failing to recover the underlying biological structure
-* At both:
+* biologically informed neural networks can match teacher predictions with high fidelity;
+* the same models can fail to recover the teacher’s gene-to-pathway weights;
+* they can also fail to recover pathway-node activations;
+* different random initializations can lead to unstable internal representations and biological rankings;
+* explicit internal anchoring can improve recovery, but only when the anchoring signal is informative, sufficiently strong and pathway-specific.
 
-  * Parameter level
-  * Activation level
-
-
----
+Overall, architectural transparency does not imply mechanistic interpretability. Without constraints enforcing identifiability, BINN interpretability reflects design rather than what the model has learned.
