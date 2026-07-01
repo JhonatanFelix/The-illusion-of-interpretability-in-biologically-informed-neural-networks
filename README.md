@@ -182,10 +182,30 @@ Train dense student networks instead of sparse/pathway-informed students:
 python Code/pathway_tasks_complete.py --task all --student_arch dense
 ```
 
+Train a parameter-matched dense student. This keeps the same input gene
+dimension `G`, but changes the dense first-layer width so its first-layer
+parameter count is close to the sparse layer's effective active edges plus
+biases:
+
+```bash
+python Code/pathway_tasks_complete.py --task all --student_arch dense_matched
+```
+
+The matched width is rounded up. If the matched width is smaller than 10,
+the script also trains wider dense matched variants by adding 3 nodes at a
+time while the width remains below 10. For example, a matched width of 3
+trains `new_P = 3, 6, 9`.
+
 To write sparse and dense student results to the same task-level metric files:
 
 ```bash
 python Code/pathway_tasks_complete.py --task all --student_arch both
+```
+
+To compare sparse students directly with parameter-matched dense students:
+
+```bash
+python Code/pathway_tasks_complete.py --task all --student_arch matched_pair
 ```
 
 Dense student rows report only task and distillation metrics, such as accuracy,
@@ -213,7 +233,7 @@ Common arguments include:
 --hidden 64          # Hidden layer size
 --epochs 120         # Number of training epochs
 --batch 512          # Batch size
---student_arch dense # sparse, dense, or both
+--student_arch dense # sparse, dense, dense_matched, both, matched_pair, or all_students
 ```
 
 ---

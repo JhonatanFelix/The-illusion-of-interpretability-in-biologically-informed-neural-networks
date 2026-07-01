@@ -1,6 +1,6 @@
 import argparse, math, os, random
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import numpy as np
 import torch
 import torch.nn as nn
@@ -75,10 +75,8 @@ class MaskedLinear(nn.Module):
         return F.linear(x, self.weight * self.mask, self.bias)
 
 class DenseLinear(nn.Module):
-    def __init__(self, mask: torch.Tensor, bias: bool = True):
+    def __init__(self, in_features: int, out_features: int, bias: bool = True):
         super().__init__()
-        out_features, in_features = mask.shape
-        self.register_buffer("mask", mask.clone().float())
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
@@ -86,13 +84,20 @@ class DenseLinear(nn.Module):
         return F.linear(x, self.weight, self.bias)
 
 class DenseBackbone(nn.Module):
-    def __init__(self, mask: torch.Tensor, hidden: int = 64, p_drop: float = 0.15):
+    def __init__(
+        self,
+        mask: torch.Tensor,
+        hidden: int = 64,
+        p_drop: float = 0.15,
+        pathway_width: Optional[int] = None,
+    ):
         super().__init__()
         P, G = mask.shape
-        self.pathway = DenseLinear(mask, bias=True)
+        dense_P = P if pathway_width is None else pathway_width
+        self.pathway = DenseLinear(G, dense_P, bias=True)
         self.head = nn.Sequential(
             nn.ReLU(), nn.Dropout(p_drop),
-            nn.Linear(P, hidden), nn.ReLU(),
+            nn.Linear(dense_P, hidden), nn.ReLU(),
             nn.Linear(hidden, hidden), nn.ReLU(),
         )
     def forward(self, x: torch.Tensor):
@@ -135,9 +140,14 @@ class SurvivalStudent(nn.Module):
         return self.risk_head(h).squeeze(-1), z
 
 class SurvivalDenseStudent(nn.Module):
-    def __init__(self, mask, hidden=64, p_drop=0.0):
+    def __init__(self, mask, hidden=64, p_drop=0.0, pathway_width: Optional[int] = None):
         super().__init__()
-        self.backbone = DenseBackbone(mask=mask, hidden=hidden, p_drop=p_drop)
+        self.backbone = DenseBackbone(
+            mask=mask,
+            hidden=hidden,
+            p_drop=p_drop,
+            pathway_width=pathway_width,
+        )
         self.risk_head = nn.Linear(hidden, 1)
     def forward(self, x):
         h, z = self.backbone(x)
@@ -164,9 +174,14 @@ class RegressionStudent(nn.Module):
         return self.out(h).squeeze(-1), z
 
 class RegressionDenseStudent(nn.Module):
-    def __init__(self, mask, hidden=64, p_drop=0.0):
+    def __init__(self, mask, hidden=64, p_drop=0.0, pathway_width: Optional[int] = None):
         super().__init__()
-        self.backbone = DenseBackbone(mask, hidden=hidden, p_drop=p_drop)
+        self.backbone = DenseBackbone(
+            mask,
+            hidden=hidden,
+            p_drop=p_drop,
+            pathway_width=pathway_width,
+        )
         self.out = nn.Linear(hidden, 1)
     def forward(self, x):
         h, z = self.backbone(x)
@@ -192,9 +207,14 @@ class BinaryStudent(nn.Module):
         return self.out(h).squeeze(-1), z
 
 class BinaryDenseStudent(nn.Module):
-    def __init__(self, mask, hidden=64, p_drop=0.0):
+    def __init__(self, mask, hidden=64, p_drop=0.0, pathway_width: Optional[int] = None):
         super().__init__()
-        self.backbone = DenseBackbone(mask, hidden=hidden, p_drop=p_drop)
+        self.backbone = DenseBackbone(
+            mask,
+            hidden=hidden,
+            p_drop=p_drop,
+            pathway_width=pathway_width,
+        )
         self.out = nn.Linear(hidden, 1)
     def forward(self, x):
         h, z = self.backbone(x)
@@ -220,9 +240,14 @@ class MultiStudent(nn.Module):
         return self.out(h), z
 
 class MultiDenseStudent(nn.Module):
-    def __init__(self, mask, K=5, hidden=64, p_drop=0.0):
+    def __init__(self, mask, K=5, hidden=64, p_drop=0.0, pathway_width: Optional[int] = None):
         super().__init__()
-        self.backbone = DenseBackbone(mask, hidden=hidden, p_drop=p_drop)
+        self.backbone = DenseBackbone(
+            mask,
+            hidden=hidden,
+            p_drop=p_drop,
+            pathway_width=pathway_width,
+        )
         self.out = nn.Linear(hidden, K)
     def forward(self, x):
         h, z = self.backbone(x)
@@ -244,12 +269,13 @@ class PathwayNet1L(nn.Module):
         return logit.squeeze(-1), z
 
 class DenseNet1L(nn.Module):
-    def __init__(self, mask, use_relu=False):
+    def __init__(self, mask, use_relu=False, pathway_width: Optional[int] = None):
         super().__init__()
         P, G = mask.shape
-        self.pathway = DenseLinear(mask, bias=True)
+        dense_P = P if pathway_width is None else pathway_width
+        self.pathway = DenseLinear(G, dense_P, bias=True)
         self.use_relu = use_relu
-        self.register_buffer("fixed_w", torch.ones(P, 1) / P)
+        self.register_buffer("fixed_w", torch.ones(dense_P, 1) / dense_P)
         self.register_buffer("fixed_b", torch.zeros(1))
     def forward(self, x):
         z = self.pathway(x)
@@ -373,36 +399,119 @@ class Config:
     data_seed: int = 123
 
 
-def student_arches(selected: str) -> List[str]:
+def is_dense_matched_arch(student_arch: str) -> bool:
+    return student_arch == "dense_matched" or student_arch.startswith("dense_matched_p")
+
+
+def dense_matched_variant(width: int) -> str:
+    return f"dense_matched_p{width}"
+
+
+def dense_matched_widths(mask: torch.Tensor) -> List[int]:
+    base_width = matched_dense_pathway_width(mask, bias=True)
+    if base_width >= 10:
+        return [base_width]
+
+    widths = []
+    width = base_width
+    while width < 10:
+        widths.append(width)
+        width += 3
+    return widths
+
+
+def student_arches(selected: str, mask: torch.Tensor) -> List[str]:
+    matched_variants = [dense_matched_variant(width) for width in dense_matched_widths(mask)]
+
     if selected == "both":
         return ["sparse", "dense"]
+    if selected == "matched_pair":
+        return ["sparse", *matched_variants]
+    if selected == "all_students":
+        return ["sparse", "dense", *matched_variants]
+    if selected == "dense_matched":
+        return matched_variants
     return [selected]
 
 
-def make_student_model(task: str, mask, cfg: Config, student_arch: str, K: int = 5):
-    if student_arch not in ("sparse", "dense"):
-        raise ValueError(f"student_arch must be sparse or dense, got {student_arch}")
+def sparse_effective_first_layer_params(mask: torch.Tensor, bias: bool = True) -> int:
+    P, _ = mask.shape
+    n_edges = int(mask.detach().sum().item())
+    return n_edges + (P if bias else 0)
 
-    dense = student_arch == "dense"
+
+def matched_dense_pathway_width(mask: torch.Tensor, bias: bool = True) -> int:
+    P, G = mask.shape
+    target_params = sparse_effective_first_layer_params(mask, bias=bias)
+    params_per_dense_unit = G + (1 if bias else 0)
+    return max(1, int(math.ceil(target_params / params_per_dense_unit)))
+
+
+def student_pathway_width(mask: torch.Tensor, student_arch: str) -> int:
+    P, _ = mask.shape
+    if student_arch.startswith("dense_matched_p"):
+        return int(student_arch.rsplit("p", 1)[1])
+    if student_arch == "dense_matched":
+        return matched_dense_pathway_width(mask, bias=True)
+    return P
+
+
+def model_pathway_module(model):
+    if hasattr(model, "backbone"):
+        return model.backbone.pathway
+    return model.pathway
+
+
+def first_layer_metadata(mask: torch.Tensor, student, cfg: Config, student_arch: str) -> Dict[str, object]:
+    P_teacher, _ = mask.shape
+    pathway = model_pathway_module(student)
+    out_features, in_features = pathway.weight.shape
+    bias_params = out_features if pathway.bias is not None else 0
+    dense_or_actual_params = int(out_features * in_features + bias_params)
+
+    if isinstance(pathway, MaskedLinear):
+        student_params = sparse_effective_first_layer_params(mask, bias=pathway.bias is not None)
+    else:
+        student_params = dense_or_actual_params
+
+    return {
+        "G": int(cfg.G),
+        "P": int(cfg.P),
+        "overlap": float(cfg.overlap),
+        "new_P": int(out_features) if is_dense_matched_arch(student_arch) else np.nan,
+        "teacher_pathway_width": int(P_teacher),
+        "student_pathway_width": int(out_features),
+        "input_genes": int(in_features),
+        "sparse_effective_first_layer_params": int(sparse_effective_first_layer_params(mask, bias=True)),
+        "student_first_layer_params": int(student_params),
+    }
+
+
+def make_student_model(task: str, mask, cfg: Config, student_arch: str, K: int = 5):
+    if student_arch not in ("sparse", "dense", "dense_matched") and not student_arch.startswith("dense_matched_p"):
+        raise ValueError(f"student_arch must be sparse, dense, or dense_matched, got {student_arch}")
+
+    dense = student_arch == "dense" or is_dense_matched_arch(student_arch)
+    pathway_width = student_pathway_width(mask, student_arch) if dense else None
 
     if task == "multiclass":
         cls = MultiDenseStudent if dense else MultiStudent
-        return cls(mask, K=K, hidden=cfg.hidden, p_drop=cfg.drop_student)
+        return cls(mask, K=K, hidden=cfg.hidden, p_drop=cfg.drop_student, pathway_width=pathway_width) if dense else cls(mask, K=K, hidden=cfg.hidden, p_drop=cfg.drop_student)
 
     if task == "binary":
         cls = BinaryDenseStudent if dense else BinaryStudent
-        return cls(mask, hidden=cfg.hidden, p_drop=cfg.drop_student)
+        return cls(mask, hidden=cfg.hidden, p_drop=cfg.drop_student, pathway_width=pathway_width) if dense else cls(mask, hidden=cfg.hidden, p_drop=cfg.drop_student)
 
     if task == "binary1l":
-        return DenseNet1L(mask, use_relu=False) if dense else PathwayNet1L(mask, use_relu=False)
+        return DenseNet1L(mask, use_relu=False, pathway_width=pathway_width) if dense else PathwayNet1L(mask, use_relu=False)
 
     if task == "regression":
         cls = RegressionDenseStudent if dense else RegressionStudent
-        return cls(mask, hidden=cfg.hidden, p_drop=cfg.drop_student)
+        return cls(mask, hidden=cfg.hidden, p_drop=cfg.drop_student, pathway_width=pathway_width) if dense else cls(mask, hidden=cfg.hidden, p_drop=cfg.drop_student)
 
     if task == "survival":
         cls = SurvivalDenseStudent if dense else SurvivalStudent
-        return cls(mask, hidden=cfg.hidden, p_drop=cfg.drop_student)
+        return cls(mask, hidden=cfg.hidden, p_drop=cfg.drop_student, pathway_width=pathway_width) if dense else cls(mask, hidden=cfg.hidden, p_drop=cfg.drop_student)
 
     raise ValueError(f"Unknown task: {task}")
 
@@ -474,6 +583,7 @@ def run_multiclass(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, se
             kd_kl=float(kd_te.item()),
             acc_vs_teacher=float(acc.item()),
         )
+        row.update(first_layer_metadata(mask, student, cfg, student_arch))
         if student_arch == "sparse":
             add_sparse_recovery_metrics(row, teacher.backbone, student.backbone, ptg, zT, zS)
         rows.append(row)
@@ -523,6 +633,7 @@ def run_binary(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds,
             kd_mse_logit=float(kd_mse),
             acc_vs_teacher=float(acc),
         )
+        row.update(first_layer_metadata(mask, student, cfg, student_arch))
         if student_arch == "sparse":
             add_sparse_recovery_metrics(row, teacher.backbone, student.backbone, ptg, zT, zS)
         rows.append(row)
@@ -573,6 +684,7 @@ def run_binary_1layer(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int,
             kd_mse_logit=float(kd_mse),
             acc_vs_teacher=float(acc),
         )
+        row.update(first_layer_metadata(mask, student, cfg, student_arch))
         if student_arch == "sparse":
             add_sparse_recovery_metrics(row, teacher, student, ptg, zT, zS)
         rows.append(row)
@@ -629,6 +741,7 @@ def run_regression(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, se
             mse_amp=float(mse),
             r2_amp=float(r2.item()),
         )
+        row.update(first_layer_metadata(mask, student, cfg, student_arch))
         if student_arch == "sparse":
             add_sparse_recovery_metrics(row, teacher.backbone, student.backbone, ptg, zT, zS)
         rows.append(row)
@@ -686,6 +799,7 @@ def run_survival(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seed
             kd_mse_risk_amp=float(kd_mse),
             cindex=float(cidx),
         )
+        row.update(first_layer_metadata(mask, student, cfg, student_arch))
         if student_arch == "sparse":
             add_sparse_recovery_metrics(row, teacher.backbone, student.backbone, ptg, zT, zS)
         rows.append(row)
@@ -718,12 +832,12 @@ def main(args):
     Xte = X_all[cfg.n_train:].to(device)
 
     seeds = [args.student_seed_base + i for i in range(100)]
-    archs = student_arches(args.student_arch)
+    archs = student_arches(args.student_arch, mask)
 
     if args.task in ("multiclass", "all"):
         frames = []
         for student_arch in archs:
-            print(f">> MULTICLASS | STUDENT={student_arch.upper()}")
+            print(f">> MULTICLASS | STUDENT={student_arch.upper()} | STUDENT_P={student_pathway_width(mask, student_arch)}")
             frames.append(run_multiclass(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds, K=args.K, student_arch=student_arch))
         df = pd.concat(frames, ignore_index=True)
         out = os.path.join(args.outdir, "metrics_multiclass.csv")
@@ -732,7 +846,7 @@ def main(args):
     if args.task in ("binary", "all"):
         frames = []
         for student_arch in archs:
-            print(f">> BINARY (nonlinear) | STUDENT={student_arch.upper()}")
+            print(f">> BINARY (nonlinear) | STUDENT={student_arch.upper()} | STUDENT_P={student_pathway_width(mask, student_arch)}")
             frames.append(run_binary(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds, student_arch=student_arch))
         df = pd.concat(frames, ignore_index=True)
         out = os.path.join(args.outdir, "metrics_binary.csv")
@@ -741,7 +855,7 @@ def main(args):
     if args.task in ("binary1l", "all"):
         frames = []
         for student_arch in archs:
-            print(f">> BINARY 1-LAYER (linear) | STUDENT={student_arch.upper()}")
+            print(f">> BINARY 1-LAYER (linear) | STUDENT={student_arch.upper()} | STUDENT_P={student_pathway_width(mask, student_arch)}")
             frames.append(run_binary_1layer(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds, student_arch=student_arch))
         df = pd.concat(frames, ignore_index=True)
         out = os.path.join(args.outdir, "metrics_binary1layer.csv")
@@ -750,7 +864,7 @@ def main(args):
     if args.task in ("regression", "all"):
         frames = []
         for student_arch in archs:
-            print(f">> REGRESSION | STUDENT={student_arch.upper()}")
+            print(f">> REGRESSION | STUDENT={student_arch.upper()} | STUDENT_P={student_pathway_width(mask, student_arch)}")
             frames.append(run_regression(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds, student_arch=student_arch))
         df = pd.concat(frames, ignore_index=True)
         out = os.path.join(args.outdir, "metrics_regression.csv")
@@ -759,7 +873,7 @@ def main(args):
     if args.task in ("survival", "all"):
         frames = []
         for student_arch in archs:
-            print(f">> SURVIVAL | STUDENT={student_arch.upper()}")
+            print(f">> SURVIVAL | STUDENT={student_arch.upper()} | STUDENT_P={student_pathway_width(mask, student_arch)}")
             frames.append(run_survival(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds, student_arch=student_arch))
         df = pd.concat(frames, ignore_index=True)
         out = os.path.join(args.outdir, "metrics_survival.csv")
@@ -772,8 +886,8 @@ if __name__ == "__main__":
                         choices=["all", "multiclass", "binary", "binary1l", "regression", "survival"])
     parser.add_argument("--students", type=int, default=20)
     parser.add_argument("--student_arch", type=str, default="sparse",
-                        choices=["sparse", "dense", "both"],
-                        help="Train sparse pathway-informed students, dense students, or both.")
+                        choices=["sparse", "dense", "dense_matched", "both", "matched_pair", "all_students"],
+                        help="Train sparse, dense, parameter-matched dense, or combined student sets.")
     parser.add_argument("--outdir", type=str, default="results_new")
     parser.add_argument("--device", type=str, default="auto", choices=["auto","mps", "cpu", "cuda"])
     # data/model
