@@ -11,6 +11,8 @@ import pandas as pd
 
 # ---------------------- utils ----------------------
 def get_device(arg_device: str) -> str:
+    if arg_device == "mps":
+        return "mps" if torch.backends.mps.is_available() else "cpu"
     if arg_device == "cuda":
         return "cuda" if torch.cuda.is_available() else "cpu"
     if arg_device == "cpu":
@@ -72,6 +74,32 @@ class MaskedLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight * self.mask, self.bias)
 
+class DenseLinear(nn.Module):
+    def __init__(self, mask: torch.Tensor, bias: bool = True):
+        super().__init__()
+        out_features, in_features = mask.shape
+        self.register_buffer("mask", mask.clone().float())
+        self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(x, self.weight, self.bias)
+
+class DenseBackbone(nn.Module):
+    def __init__(self, mask: torch.Tensor, hidden: int = 64, p_drop: float = 0.15):
+        super().__init__()
+        P, G = mask.shape
+        self.pathway = DenseLinear(mask, bias=True)
+        self.head = nn.Sequential(
+            nn.ReLU(), nn.Dropout(p_drop),
+            nn.Linear(P, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+        )
+    def forward(self, x: torch.Tensor):
+        z = self.pathway(x)
+        h = self.head(z)
+        return h, z
+ 
 class PathwayBackbone(nn.Module):
     def __init__(self, mask: torch.Tensor, hidden: int = 64, p_drop: float = 0.15):
         super().__init__()
@@ -106,6 +134,16 @@ class SurvivalStudent(nn.Module):
         h, z = self.backbone(x)
         return self.risk_head(h).squeeze(-1), z
 
+class SurvivalDenseStudent(nn.Module):
+    def __init__(self, mask, hidden=64, p_drop=0.0):
+        super().__init__()
+        self.backbone = DenseBackbone(mask=mask, hidden=hidden, p_drop=p_drop)
+        self.risk_head = nn.Linear(hidden, 1)
+    def forward(self, x):
+        h, z = self.backbone(x)
+        return self.risk_head(h).squeeze(-1), z
+    
+
 # Regression
 class RegressionTeacher(nn.Module):
     def __init__(self, mask, hidden=64, p_drop=0.15):
@@ -120,6 +158,15 @@ class RegressionStudent(nn.Module):
     def __init__(self, mask, hidden=64, p_drop=0.0):
         super().__init__()
         self.backbone = PathwayBackbone(mask, hidden=hidden, p_drop=p_drop)
+        self.out = nn.Linear(hidden, 1)
+    def forward(self, x):
+        h, z = self.backbone(x)
+        return self.out(h).squeeze(-1), z
+
+class RegressionDenseStudent(nn.Module):
+    def __init__(self, mask, hidden=64, p_drop=0.0):
+        super().__init__()
+        self.backbone = DenseBackbone(mask, hidden=hidden, p_drop=p_drop)
         self.out = nn.Linear(hidden, 1)
     def forward(self, x):
         h, z = self.backbone(x)
@@ -144,6 +191,15 @@ class BinaryStudent(nn.Module):
         h, z = self.backbone(x)
         return self.out(h).squeeze(-1), z
 
+class BinaryDenseStudent(nn.Module):
+    def __init__(self, mask, hidden=64, p_drop=0.0):
+        super().__init__()
+        self.backbone = DenseBackbone(mask, hidden=hidden, p_drop=p_drop)
+        self.out = nn.Linear(hidden, 1)
+    def forward(self, x):
+        h, z = self.backbone(x)
+        return self.out(h).squeeze(-1), z
+
 # Multiclass
 class MultiTeacher(nn.Module):
     def __init__(self, mask, K=5, hidden=64, p_drop=0.15):
@@ -163,6 +219,15 @@ class MultiStudent(nn.Module):
         h, z = self.backbone(x)
         return self.out(h), z
 
+class MultiDenseStudent(nn.Module):
+    def __init__(self, mask, K=5, hidden=64, p_drop=0.0):
+        super().__init__()
+        self.backbone = DenseBackbone(mask, hidden=hidden, p_drop=p_drop)
+        self.out = nn.Linear(hidden, K)
+    def forward(self, x):
+        h, z = self.backbone(x)
+        return self.out(h), z
+    
 # 1-layer lineare (media pathways -> logit)
 class PathwayNet1L(nn.Module):
     def __init__(self, mask, use_relu=False):
@@ -177,7 +242,22 @@ class PathwayNet1L(nn.Module):
         if self.use_relu: z = F.relu(z)
         logit = z @ self.fixed_w + self.fixed_b
         return logit.squeeze(-1), z
-        
+
+class DenseNet1L(nn.Module):
+    def __init__(self, mask, use_relu=False):
+        super().__init__()
+        P, G = mask.shape
+        self.pathway = DenseLinear(mask, bias=True)
+        self.use_relu = use_relu
+        self.register_buffer("fixed_w", torch.ones(P, 1) / P)
+        self.register_buffer("fixed_b", torch.zeros(1))
+    def forward(self, x):
+        z = self.pathway(x)
+        if self.use_relu: z = F.relu(z)
+        logit = z @ self.fixed_w + self.fixed_b
+        return logit.squeeze(-1), z
+
+
 @torch.no_grad()
 def pathway_activation_alignment(zT: torch.Tensor, zS: torch.Tensor):
     """
@@ -293,8 +373,62 @@ class Config:
     data_seed: int = 123
 
 
+def student_arches(selected: str) -> List[str]:
+    if selected == "both":
+        return ["sparse", "dense"]
+    return [selected]
+
+
+def make_student_model(task: str, mask, cfg: Config, student_arch: str, K: int = 5):
+    if student_arch not in ("sparse", "dense"):
+        raise ValueError(f"student_arch must be sparse or dense, got {student_arch}")
+
+    dense = student_arch == "dense"
+
+    if task == "multiclass":
+        cls = MultiDenseStudent if dense else MultiStudent
+        return cls(mask, K=K, hidden=cfg.hidden, p_drop=cfg.drop_student)
+
+    if task == "binary":
+        cls = BinaryDenseStudent if dense else BinaryStudent
+        return cls(mask, hidden=cfg.hidden, p_drop=cfg.drop_student)
+
+    if task == "binary1l":
+        return DenseNet1L(mask, use_relu=False) if dense else PathwayNet1L(mask, use_relu=False)
+
+    if task == "regression":
+        cls = RegressionDenseStudent if dense else RegressionStudent
+        return cls(mask, hidden=cfg.hidden, p_drop=cfg.drop_student)
+
+    if task == "survival":
+        cls = SurvivalDenseStudent if dense else SurvivalStudent
+        return cls(mask, hidden=cfg.hidden, p_drop=cfg.drop_student)
+
+    raise ValueError(f"Unknown task: {task}")
+
+
+def add_sparse_recovery_metrics(row, teacher_pathway_module, student_pathway_module, ptg, zT, zS):
+    rel, cs, cp = pathway_weight_scores_both(
+        teacher_pathway_module,
+        student_pathway_module,
+        ptg,
+        lambda_b=1.0,
+    )
+    act_metrics = pathway_activation_alignment(zT, zS)
+
+    row.update(dict(
+        relL2_mean=float(rel.mean()),
+        cos_std_mean=float(cs.mean()),
+        cos_pos_mean=float(cp.mean()),
+        act_corr_mean=act_metrics["act_corr_mean"],
+        act_cosine_mean=act_metrics["act_cosine_mean"],
+        act_r2=act_metrics["act_r2"],
+    ))
+    return row
+
+
 # ---------------------- runners per task ----------------------
-def run_multiclass(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds, K: int = 5):
+def run_multiclass(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds, K: int = 5, student_arch: str = "sparse"):
     teacher = MultiTeacher(mask, K=K, hidden=cfg.hidden, p_drop=cfg.drop_teacher).to(device)
     teacher.eval()
     with torch.no_grad():
@@ -311,7 +445,7 @@ def run_multiclass(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, se
     rows = []
     for s in seeds[:n_students]:
         set_all_seeds(s)
-        student = MultiStudent(mask, K=K, hidden=cfg.hidden, p_drop=cfg.drop_student).to(device)
+        student = make_student_model("multiclass", mask, cfg, student_arch, K=K).to(device)
         opt = torch.optim.Adam(student.parameters(), lr=cfg.lr, weight_decay=cfg.wd)
         ds = DataLoader(TensorDataset(Xtr.to(device), tprob_tr), batch_size=cfg.batch, shuffle=True)
         student.train()
@@ -323,13 +457,13 @@ def run_multiclass(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, se
         student.eval()
         with torch.no_grad():
             slog_te, zS = student(Xte.to(device))
-            _, zT = teacher(Xte.to(device))
             kd_te = F.kl_div(F.log_softmax(slog_te / cfg.temp, dim=1), tprob_te, reduction="batchmean") * (cfg.temp**2)
             acc = (torch.argmax(slog_te, dim=1) == yte_hard).float().mean()
-            act_metrics = pathway_activation_alignment(zT, zS)
+            if student_arch == "sparse":
+                _, zT = teacher(Xte.to(device))
 
-        rel, cs, cp = pathway_weight_scores_both(teacher.backbone, student.backbone, ptg, lambda_b=1.0)
-        rows.append(dict(
+        row = dict(
+            student_arch=student_arch,
             student_seed=s,
 
             # --- Teacher reference metrics ---
@@ -339,19 +473,13 @@ def run_multiclass(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, se
             # --- Student metrics ---
             kd_kl=float(kd_te.item()),
             acc_vs_teacher=float(acc.item()),
-
-            # --- Weight recovery (student vs teacher) ---
-            relL2_mean=float(rel.mean()),
-            cos_std_mean=float(cs.mean()),
-            cos_pos_mean=float(cp.mean()),
-            
-            act_corr_mean=act_metrics["act_corr_mean"],
-            act_cosine_mean=act_metrics["act_cosine_mean"],
-            act_r2=act_metrics["act_r2"],
-        ))
+        )
+        if student_arch == "sparse":
+            add_sparse_recovery_metrics(row, teacher.backbone, student.backbone, ptg, zT, zS)
+        rows.append(row)
     return pd.DataFrame(rows)
 
-def run_binary(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds):
+def run_binary(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds, student_arch: str = "sparse"):
     teacher = BinaryTeacher(mask, hidden=cfg.hidden, p_drop=cfg.drop_teacher).to(device)
     teacher.eval()
     with torch.no_grad():
@@ -366,7 +494,7 @@ def run_binary(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds)
     rows = []
     for s in seeds[:n_students]:
         set_all_seeds(s)
-        student = BinaryStudent(mask, hidden=cfg.hidden, p_drop=cfg.drop_student).to(device)
+        student = make_student_model("binary", mask, cfg, student_arch).to(device)
         opt = torch.optim.Adam(student.parameters(), lr=cfg.lr, weight_decay=cfg.wd)
         ds = DataLoader(TensorDataset(Xtr.to(device), tlog_tr), batch_size=cfg.batch, shuffle=True)
         student.train()
@@ -378,13 +506,13 @@ def run_binary(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds)
         student.eval()
         with torch.no_grad():
             slog_te, zS = student(Xte.to(device))
-            _, zT = teacher(Xte.to(device))
             kd_mse = F.mse_loss(slog_te, tlog_te).item()
             acc = ((slog_te > 0).long() == yte_hard).float().mean().item()
-            act_metrics = pathway_activation_alignment(zT, zS)
+            if student_arch == "sparse":
+                _, zT = teacher(Xte.to(device))
 
-        rel, cs, cp = pathway_weight_scores_both(teacher.backbone, student.backbone, ptg, lambda_b=1.0)
-        rows.append(dict(
+        row = dict(
+            student_arch=student_arch,
             student_seed=s,
 
             # --- Teacher reference metrics ---
@@ -394,19 +522,13 @@ def run_binary(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds)
             # --- Student metrics ---
             kd_mse_logit=float(kd_mse),
             acc_vs_teacher=float(acc),
-
-            # --- Weight recovery (student vs teacher) ---
-            relL2_mean=float(rel.mean()),
-            cos_std_mean=float(cs.mean()),
-            cos_pos_mean=float(cp.mean()),
-            
-            act_corr_mean=act_metrics["act_corr_mean"],
-            act_cosine_mean=act_metrics["act_cosine_mean"],
-            act_r2=act_metrics["act_r2"],
-        ))
+        )
+        if student_arch == "sparse":
+            add_sparse_recovery_metrics(row, teacher.backbone, student.backbone, ptg, zT, zS)
+        rows.append(row)
     return pd.DataFrame(rows)
 
-def run_binary_1layer(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds):
+def run_binary_1layer(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds, student_arch: str = "sparse"):
     teacher = PathwayNet1L(mask, use_relu=False).to(device)
     teacher.eval()
     with torch.no_grad():
@@ -421,7 +543,7 @@ def run_binary_1layer(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int,
     rows = []
     for s in seeds[:n_students]:
         set_all_seeds(s)
-        student = PathwayNet1L(mask, use_relu=False).to(device)
+        student = make_student_model("binary1l", mask, cfg, student_arch).to(device)
         opt = torch.optim.Adam(student.parameters(), lr=cfg.lr, weight_decay=cfg.wd)
         ds = DataLoader(TensorDataset(Xtr.to(device), tlog_tr), batch_size=cfg.batch, shuffle=True)
         student.train()
@@ -433,20 +555,14 @@ def run_binary_1layer(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int,
         student.eval()
         with torch.no_grad():
             slog_te, zS = student(Xte.to(device))
-            _, zT = teacher(Xte.to(device))
 
             kd_mse = F.mse_loss(slog_te, tlog_te).item()
             acc = ((slog_te > 0).long() == yte_hard).float().mean().item()
+            if student_arch == "sparse":
+                _, zT = teacher(Xte.to(device))
 
-            act_metrics = pathway_activation_alignment(zT, zS)
-
-        
-        class Dummy: pass
-        T, S = Dummy(), Dummy()
-        T.pathway = teacher.pathway; S.pathway = student.pathway
-        rel, cs, cp = pathway_weight_scores_both(T, S, ptg, lambda_b=1.0)
-
-        rows.append(dict(
+        row = dict(
+            student_arch=student_arch,
             student_seed=s,
 
             # --- Teacher reference metrics ---
@@ -456,19 +572,13 @@ def run_binary_1layer(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int,
             # --- Student metrics ---
             kd_mse_logit=float(kd_mse),
             acc_vs_teacher=float(acc),
-
-            # --- Weight recovery (student vs teacher) ---
-            relL2_mean=float(rel.mean()),
-            cos_std_mean=float(cs.mean()),
-            cos_pos_mean=float(cp.mean()),
-            
-            act_corr_mean=act_metrics["act_corr_mean"],
-            act_cosine_mean=act_metrics["act_cosine_mean"],
-            act_r2=act_metrics["act_r2"],
-        ))
+        )
+        if student_arch == "sparse":
+            add_sparse_recovery_metrics(row, teacher, student, ptg, zT, zS)
+        rows.append(row)
     return pd.DataFrame(rows)
 
-def run_regression(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds):
+def run_regression(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds, student_arch: str = "sparse"):
     teacher = RegressionTeacher(mask, hidden=cfg.hidden, p_drop=cfg.drop_teacher).to(device)
     teacher.eval()
     with torch.no_grad():
@@ -487,7 +597,7 @@ def run_regression(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, se
     rows = []
     for s in seeds[:n_students]:
         set_all_seeds(s)
-        student = RegressionStudent(mask, hidden=cfg.hidden, p_drop=cfg.drop_student).to(device)
+        student = make_student_model("regression", mask, cfg, student_arch).to(device)
         opt = torch.optim.Adam(student.parameters(), lr=cfg.lr, weight_decay=cfg.wd)
         ds = DataLoader(TensorDataset(Xtr.to(device), y_tr_amp.detach()), batch_size=cfg.batch, shuffle=True)
         student.train()
@@ -499,17 +609,16 @@ def run_regression(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, se
         student.eval()
         with torch.no_grad():
             y_hat, zS = student(Xte.to(device))
-            _, zT = teacher(Xte.to(device))
 
             mse = F.mse_loss(y_hat, y_te_amp).item()
             ss_res = torch.sum((y_te_amp - y_hat)**2)
             ss_tot = torch.sum((y_te_amp - y_te_amp.mean())**2)
             r2 = 1 - ss_res / ss_tot
+            if student_arch == "sparse":
+                _, zT = teacher(Xte.to(device))
 
-            act_metrics = pathway_activation_alignment(zT, zS)
-
-        rel, cs, cp = pathway_weight_scores_both(teacher.backbone, student.backbone, ptg, lambda_b=1.0)
-        rows.append(dict(
+        row = dict(
+            student_arch=student_arch,
             student_seed=s,
 
             # --- Teacher reference metrics ---
@@ -519,20 +628,13 @@ def run_regression(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, se
             # --- Student metrics ---
             mse_amp=float(mse),
             r2_amp=float(r2.item()),
-
-            # --- Weight recovery (student vs teacher) ---
-            relL2_mean=float(rel.mean()),
-            cos_std_mean=float(cs.mean()),
-            cos_pos_mean=float(cp.mean()),
-            
-            # --- Activation Nodes Recovery
-            act_corr_mean=act_metrics["act_corr_mean"],
-            act_cosine_mean=act_metrics["act_cosine_mean"],
-            act_r2=act_metrics["act_r2"],
-        ))
+        )
+        if student_arch == "sparse":
+            add_sparse_recovery_metrics(row, teacher.backbone, student.backbone, ptg, zT, zS)
+        rows.append(row)
     return pd.DataFrame(rows)
 
-def run_survival(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds):
+def run_survival(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seeds, student_arch: str = "sparse"):
     teacher = SurvivalTeacher(mask, hidden=cfg.hidden, p_drop=cfg.drop_teacher).to(device)
     teacher.eval()
     with torch.no_grad():
@@ -554,7 +656,7 @@ def run_survival(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seed
     rows = []
     for s in seeds[:n_students]:
         set_all_seeds(s)
-        student = SurvivalStudent(mask, hidden=cfg.hidden, p_drop=cfg.drop_student).to(device)
+        student = make_student_model("survival", mask, cfg, student_arch).to(device)
         opt = torch.optim.Adam(student.parameters(), lr=cfg.lr, weight_decay=cfg.wd)
         ds = DataLoader(TensorDataset(Xtr.to(device), r_tr_amp.detach()), batch_size=cfg.batch, shuffle=True)
         student.train()
@@ -566,15 +668,14 @@ def run_survival(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seed
         student.eval()
         with torch.no_grad():
             rs_te, zS = student(Xte.to(device))
-            _, zT = teacher(Xte.to(device))
 
             kd_mse = F.mse_loss(rs_te, r_te_amp).item()
             cidx = concordance_index(rs_te, t_te.to(device), e_te.to(device))
+            if student_arch == "sparse":
+                _, zT = teacher(Xte.to(device))
 
-            act_metrics = pathway_activation_alignment(zT, zS)
-
-        rel, cs, cp = pathway_weight_scores_both(teacher.backbone, student.backbone, ptg, lambda_b=1.0)
-        rows.append(dict(
+        row = dict(
+            student_arch=student_arch,
             student_seed=s,
 
             # --- Teacher reference metrics ---
@@ -584,17 +685,10 @@ def run_survival(mask, ptg, Xtr, Xte, device, cfg: Config, n_students: int, seed
             # --- Student metrics ---
             kd_mse_risk_amp=float(kd_mse),
             cindex=float(cidx),
-
-            # --- Weight recovery (student vs teacher) ---
-            relL2_mean=float(rel.mean()),
-            cos_std_mean=float(cs.mean()),
-            cos_pos_mean=float(cp.mean()),
-            
-            # --- Activation recovery ---
-            act_corr_mean=act_metrics["act_corr_mean"],
-            act_cosine_mean=act_metrics["act_cosine_mean"],
-            act_r2=act_metrics["act_r2"],
-        ))
+        )
+        if student_arch == "sparse":
+            add_sparse_recovery_metrics(row, teacher.backbone, student.backbone, ptg, zT, zS)
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -624,34 +718,50 @@ def main(args):
     Xte = X_all[cfg.n_train:].to(device)
 
     seeds = [args.student_seed_base + i for i in range(100)]
+    archs = student_arches(args.student_arch)
 
     if args.task in ("multiclass", "all"):
-        print(">> MULTICLASS")
-        df = run_multiclass(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds, K=args.K)
+        frames = []
+        for student_arch in archs:
+            print(f">> MULTICLASS | STUDENT={student_arch.upper()}")
+            frames.append(run_multiclass(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds, K=args.K, student_arch=student_arch))
+        df = pd.concat(frames, ignore_index=True)
         out = os.path.join(args.outdir, "metrics_multiclass.csv")
         df.to_csv(out, index=False); print("saved:", out)
 
     if args.task in ("binary", "all"):
-        print(">> BINARY (nonlinear)")
-        df = run_binary(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds)
+        frames = []
+        for student_arch in archs:
+            print(f">> BINARY (nonlinear) | STUDENT={student_arch.upper()}")
+            frames.append(run_binary(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds, student_arch=student_arch))
+        df = pd.concat(frames, ignore_index=True)
         out = os.path.join(args.outdir, "metrics_binary.csv")
         df.to_csv(out, index=False); print("saved:", out)
 
     if args.task in ("binary1l", "all"):
-        print(">> BINARY 1-LAYER (linear)")
-        df = run_binary_1layer(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds)
+        frames = []
+        for student_arch in archs:
+            print(f">> BINARY 1-LAYER (linear) | STUDENT={student_arch.upper()}")
+            frames.append(run_binary_1layer(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds, student_arch=student_arch))
+        df = pd.concat(frames, ignore_index=True)
         out = os.path.join(args.outdir, "metrics_binary1layer.csv")
         df.to_csv(out, index=False); print("saved:", out)
 
     if args.task in ("regression", "all"):
-        print(">> REGRESSION")
-        df = run_regression(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds)
+        frames = []
+        for student_arch in archs:
+            print(f">> REGRESSION | STUDENT={student_arch.upper()}")
+            frames.append(run_regression(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds, student_arch=student_arch))
+        df = pd.concat(frames, ignore_index=True)
         out = os.path.join(args.outdir, "metrics_regression.csv")
         df.to_csv(out, index=False); print("saved:", out)
 
     if args.task in ("survival", "all"):
-        print(">> SURVIVAL")
-        df = run_survival(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds)
+        frames = []
+        for student_arch in archs:
+            print(f">> SURVIVAL | STUDENT={student_arch.upper()}")
+            frames.append(run_survival(mask, ptg, Xtr, Xte, device, cfg, args.students, seeds, student_arch=student_arch))
+        df = pd.concat(frames, ignore_index=True)
         out = os.path.join(args.outdir, "metrics_survival.csv")
         df.to_csv(out, index=False); print("saved:", out)
 
@@ -661,8 +771,11 @@ if __name__ == "__main__":
     parser.add_argument("--task", type=str, default="all",
                         choices=["all", "multiclass", "binary", "binary1l", "regression", "survival"])
     parser.add_argument("--students", type=int, default=20)
+    parser.add_argument("--student_arch", type=str, default="sparse",
+                        choices=["sparse", "dense", "both"],
+                        help="Train sparse pathway-informed students, dense students, or both.")
     parser.add_argument("--outdir", type=str, default="results_new")
-    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--device", type=str, default="auto", choices=["auto","mps", "cpu", "cuda"])
     # data/model
     parser.add_argument("--G", type=int, default=400)
     parser.add_argument("--P", type=int, default=60)
@@ -690,4 +803,3 @@ if __name__ == "__main__":
     parser.add_argument("--student_seed_base", type=int, default=9000)
     args = parser.parse_args()
     main(args)
-

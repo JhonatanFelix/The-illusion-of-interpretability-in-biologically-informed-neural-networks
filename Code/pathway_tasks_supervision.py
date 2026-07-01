@@ -16,6 +16,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 # ---------------------- utils ----------------------
 def get_device(arg_device: str) -> str:
+    if arg_device == "mps":
+        return "mps" if torch.backends.mps.is_available() else "cpu"
     if arg_device == "cuda":
         return "cuda" if torch.cuda.is_available() else "cpu"
     if arg_device == "cpu":

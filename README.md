@@ -176,6 +176,22 @@ python Code/pathway_tasks_complete.py --task regression
 python Code/pathway_tasks_complete.py --task survival
 ```
 
+Train dense student networks instead of sparse/pathway-informed students:
+
+```bash
+python Code/pathway_tasks_complete.py --task all --student_arch dense
+```
+
+To write sparse and dense student results to the same task-level metric files:
+
+```bash
+python Code/pathway_tasks_complete.py --task all --student_arch both
+```
+
+Dense student rows report only task and distillation metrics, such as accuracy,
+MSE, R² and concordance index. Teacher-student weight and pathway-activation
+recovery metrics are intentionally reported only for sparse students.
+
 Example with custom biological structure:
 
 ```bash
@@ -197,6 +213,7 @@ Common arguments include:
 --hidden 64          # Hidden layer size
 --epochs 120         # Number of training epochs
 --batch 512          # Batch size
+--student_arch dense # sparse, dense, or both
 ```
 
 ---
