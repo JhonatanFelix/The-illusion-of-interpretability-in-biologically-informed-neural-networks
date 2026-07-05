@@ -191,10 +191,10 @@ biases:
 python Code/pathway_tasks_complete.py --task all --student_arch dense_matched
 ```
 
-The matched width is rounded up. If the matched width is smaller than 10,
+The matched width is rounded up. If the matched width is smaller than 20,
 the script also trains wider dense matched variants by adding 3 nodes at a
-time while the width remains below 10. For example, a matched width of 3
-trains `new_P = 3, 6, 9`.
+time while the width remains below 20. For example, a matched width of 3
+trains `new_P = 3, 6, 9, 12, 15, 18`.
 
 To write sparse and dense student results to the same task-level metric files:
 
@@ -207,6 +207,28 @@ To compare sparse students directly with parameter-matched dense students:
 ```bash
 python Code/pathway_tasks_complete.py --task all --student_arch matched_pair
 ```
+
+Compare sparse student initialization strategies while keeping the teacher fixed:
+
+```bash
+python Code/pathway_tasks_complete.py --task all --student_arch sparse --init_strategy all
+```
+
+The initialization strategies are:
+
+```text
+default        Current implementation; initializes the full masked weight tensor.
+sparse_fan_in  Reinitializes active masked weights row-wise using active pathway fan-in.
+sparse_he      Reinitializes active masked weights row-wise using He/ReLU fan-in scaling.
+```
+
+The output CSVs include an `init_strategy` column. For sparse students, each
+initialization row also keeps the usual task, first-layer weight recovery and
+pathway-activation recovery metrics.
+
+For binary tasks, the CSV also includes teacher-logit margin diagnostics and a
+margin-filtered accuracy column because the raw sign-threshold accuracy can be
+unstable when many teacher logits are very close to zero.
 
 Dense student rows report only task and distillation metrics, such as accuracy,
 MSE, R² and concordance index. Teacher-student weight and pathway-activation
@@ -234,6 +256,7 @@ Common arguments include:
 --epochs 120         # Number of training epochs
 --batch 512          # Batch size
 --student_arch dense # sparse, dense, dense_matched, both, matched_pair, or all_students
+--init_strategy all  # default, sparse_fan_in, sparse_he, or all
 ```
 
 ---
