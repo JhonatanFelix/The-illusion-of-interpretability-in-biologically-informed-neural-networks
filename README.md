@@ -234,6 +234,23 @@ Dense student rows report only task and distillation metrics, such as accuracy,
 MSE, R² and concordance index. Teacher-student weight and pathway-activation
 recovery metrics are intentionally reported only for sparse students.
 
+### Exploratory regression fidelity study
+
+The repository also includes a diagnostic study of why the scalar regression
+student reaches approximately 0.8 test R² under the default finite-data setup.
+It audits comparable continuous metrics across tasks, tests alternative
+optimization strategies, verifies exact architectural representability, and
+runs a nested fixed-test sample-size experiment:
+
+```bash
+python Code/task_fidelity_audit.py --students 1
+python Code/regression_fidelity_study.py --students 3
+python Code/regression_sample_size_study.py --students 3
+```
+
+The design, findings, and recommended follow-up are documented in
+[`Regression_Fidelity_Study/README.md`](Regression_Fidelity_Study/README.md).
+
 Example with custom biological structure:
 
 ```bash
